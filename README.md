@@ -11,3 +11,10 @@ Alignment for these data was performed using the human reference genome (hg38) a
 For AMP-PD we utilized Terra platform
 
 #Analysis of UKBB cohort was performed localy using Neurohub#
+Filtration detailed in the UKBB script
+
+#Analysis of AMP-PD data was performed using Terra platform#
+Filtration detailed in the AMP-PD script
+
+#burden analysis and meta-analysis between cohort was performed using SKAT-0 and meta-SKAT packages#
+detailed in the meta-analysis script
