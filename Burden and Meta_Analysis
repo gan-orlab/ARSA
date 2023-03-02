@@ -1,0 +1,59 @@
+wd <- getwd()
+
+packrat::init("~/runs/eyu8/library/SKAT")
+library(SKAT)
+library(MetaSKAT)
+
+
+setwd(wd)
+
+File.Meta.SKATO = "ARSA_meta_30x.results.skato"
+File.Meta.BURDEN = "ARSA_meta_30x.results.burden"
+
+File.Mat.vec<-rep("",6)
+File.SetInfo.vec<-rep("",6)
+
+i = 1
+for(cohort in c("ISR","NY","FC","RUS","UKBB","AMP_PD")){
+    File.Bed   = paste0("ARSA_",cohort,"_30x.bed")
+    File.Bim   = paste0("ARSA_",cohort,"_30x",".bim")
+    File.Fam   = paste0("ARSA_",cohort,"_30x",".fam")
+    File.SetID   = paste0("ARSA_",cohort,"_30x",".SETID")
+    File.SSD = paste0("ARSA_",cohort,"_30x",".SSD")
+    File.Info = paste0("ARSA_",cohort,"_30x",".info")
+    File.Mat   = paste0("ARSA_",cohort,"_30x",".mat")
+    File.SetInfo  = paste0("ARSA_",cohort,"_30x",".MInfo")
+    File.cov = paste0("covar",cohort,".txt")
+    File.Results.SKATO = paste0("ARSA_",cohort,"_30x.results.skato")
+    File.Results.BURDEN = paste0("ARSA_",cohort,"_30x.results.burden")
+
+    Generate_SSD_SetID(File.Bed, File.Bim, File.Fam, File.SetID, File.SSD, File.Info)
+    SSD.INFO<-Open_SSD(File.SSD, File.Info)
+
+    FAM<-Read_Plink_FAM_Cov(File.Fam, File.cov, Is.binary =TRUE, cov_header=TRUE)
+    y<-(FAM$Status-1)
+    Age<-FAM$Age
+    Sex<-FAM$Sex.y
+    N.Sample<-length(y)
+    obj<-SKAT_Null_Model(y ~ Age + Sex, out_type="D")
+
+    out.skato<-SKATBinary.SSD.All(SSD.INFO, obj, method="optimal.adj")
+    out.skato.burden<-SKATBinary.SSD.All(SSD.INFO, obj, method="Burden")
+    write.table(out.skato$results, file=File.Results.SKATO, col.names = TRUE, row.names = FALSE)
+    write.table(out.skato.burden$results, file=File.Results.BURDEN, col.names = TRUE, row.names = FALSE)
+
+    re1<-Generate_Meta_Files(obj, File.Bed, File.Bim, File.SetID, File.Mat, File.SetInfo, N.Sample)
+
+    File.Mat.vec[i] <- File.Mat
+    File.SetInfo.vec[i] <- File.SetInfo
+
+    i <- i + 1
+}
+
+
+Cohort.Info <- Open_MSSD_File_2Read(File.Mat.vec, File.SetInfo.vec)
+
+out.skato.burden <- MetaSKAT_MSSD_ALL(Cohort.Info, method = "Burden")
+out.skato<- MetaSKAT_MSSD_ALL(Cohort.Info, method = "optimal")
+write.table(out.skato, file= File.Meta.SKATO, col.names = TRUE, row.names = FALSE)
+write.table(out.skato.burden, file= File.Meta.BURDEN, col.names = TRUE, row.names = FALSE)
