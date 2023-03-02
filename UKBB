@@ -1,0 +1,56 @@
+library(data.table)
+
+#Read table with all fields
+ukb <- as.data.frame(fread("/tabular/current.csv"))
+
+#Write field of interest
+field <- c("20002","41270","20111","20110","20107","22001","22006","22009","22000","189","34","21022","22021","22019","22027")
+
+#Change into pattern recognisable by grep
+pattern <- paste0("^",field,"-",collapse = "|")
+
+#Selct field of interest
+ukb_filtered <- ukb[,c(1,grep(pattern,names(ukb)))]
+
+#Select PD self-reported (code 1262) and ICD10 codes (G20)
+ukb_self <- ukb_filtered[,c(1,grep("^20002-",names(ukb_filtered)))]
+PD_self <- ukb_self[which(apply(ukb_self,1,function(i){any(i == 1262)})),]$eid
+ukb_ICD <- ukb_filtered[,c(1,grep("^41270-",names(ukb_filtered)))]
+PD_ICD <- ukb_ICD[which(apply(ukb_ICD,1,function(i){any(i == "G20")})),]$eid
+PD <- union(PD_self, PD_ICD)
+
+#Select proxy cases from father, mother, sibling and exclude PD cases
+ukb_proxy <- ukb_filtered[,c(1,grep("^20111-|^20110-|^20107-",names(ukb_filtered)))]
+PD_proxy_notexcluding_PD <- ukb_proxy[which(apply(ukb_proxy,1,function(i){any(i == 11)})),]$eid
+PD_proxy <- setdiff(PD_proxy_notexcluding_PD, PD)
+
+#Select the rest as controls
+control <- setdiff(ukb_filtered$eid,union(PD_proxy,PD))
+
+#Perform filter for samples with known issue (aneupleudy, missingness, het outlier) and relatedness (0 = no closer than 3rd degree relative) & ancestry filter (1 = causacian)
+ukb_unrelated <- readLines("~/runs/go_lab/GRCh37/ukbb/UKBB_raw_data_no_cousins.txt")
+ukb_filtered_unrelated <- ukb_filtered[ukb_filtered$eid %in% ukb_unrelated,]
+ukb_filtered_unrelated_euro <- ukb_filtered_unrelated[ukb_filtered_unrelated$"22006-0.0" %in% 1,]
+ukb_filtered_unrelated_euro_aneu <- ukb_filtered_unrelated_euro[!(ukb_filtered_unrelated_euro$"22019-0.0" %in% 1),]
+ukb_filtered_unrelated_euro_aneu_miss <- ukb_filtered_unrelated_euro_aneu[!(ukb_filtered_unrelated_euro_aneu$"22027-0.0" %in% 1),]
+
+
+###Step 1 do tabix for  UKBB files
+for N in {0..96}; do sbatch -c 1 --mem=10g -t 6:0:0 --wrap="bash ../tabix.sh ukb23156_c22_b${N}_v1.vcf.gz" ; done
+#step 2 , do GATK with GQ30 DP20 also remove multiallelic sites
+for N in {0..22}; do sbatch -c 2 --mem=15g -t 6:0:0 --wrap="vcftools --gzvcf ukb23156_c22_b${N}_v1.vcf.gz_GQ20_DP10_MISS_filtered.vcf.gz --max-alleles 2 --min-alleles 2 --recode --stdout | gzip -c > ukb23156_c22_b${N}_v1.vcf.gz_GQ20_DP10_MISS_filtered_2alleles.vcf.gz"; done
+#convert to b-files
+for N in {0..22}; do sbatch -c 2 --mem=12g -t 6:0:0 --wrap="plink --vcf ukb23156_c22_b${N}_v1.vcf.gz_GQ20_DP10_MISS_filtered_2alleles.vcf.gz   --vcf-half-call m --make-bed --out ukb23156_c22_b${N}_v1_after_GATK";done
+####convert vcf to ANNOVAR format
+for N in {0..22}; do sbatch -c 1 --mem=10g -t 8:0:0 --wrap="perl ~/runs/krohn/krohn/Home/annovar/convert2annovar.pl --format vcf4 ukb23156_c22_b${N}_v1.vcf.gz_GQ20_DP10_MISS_filtered_2alleles.vcf.gz --allsample --withfreq --outfile chr22_b${N}_recode_convert" ; done
+
+###annotate all snps
+for N in {0..22}; do sbatch -c 1 --mem=8g -t 3:0:0 --wrap="perl ~/runs/krohn/krohn/Home/annovar/table_annovar.pl chr22_b${N}_recode_convert /scratch/senkkon/UKBB/FILTERED/annovar/humandb/ --buildver hg38 --out annotated/chr22_b${N}_recode_convert.annovar --remove --protocol refGene,ljb26_all,dbnsfp41c --operation g,f,f --nastring ." ; done
+
+for N in 22; do mkdir chr${N}/annotated; done
+for N in 22; do mkdir chr${N}/annotated/all_coding; done
+for N in 22; do mkdir chr${N}/annotated/CADD; done
+for N in 22; do mkdir chr${N}/annotated/all_rare; done
+for N in 22; do mkdir chr${N}/annotated/all_functional; done
+
+We than Extracted ARSA (hg38) and perform meta-analysis with AMP_PD and McGIll cohorts.
