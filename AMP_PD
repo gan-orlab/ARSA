@@ -1,0 +1,246 @@
+# Use the os package to interact with the environment
+import os
+
+# Bring in Pandas for Dataframe functionality
+import pandas as pd
+pd.options.mode.chained_assignment = None
+
+# Enable interaction with the FireCloud API
+from firecloud import api as fapi
+
+# BigQuery for querying data
+from google.cloud import bigquery
+
+#Set up billing project and data path variables
+
+BILLING_PROJECT_ID = os.environ['GOOGLE_PROJECT']
+WORKSPACE_NAMESPACE = os.environ['WORKSPACE_NAMESPACE']
+WORKSPACE_NAME = os.environ['WORKSPACE_NAME']
+WORKSPACE_BUCKET = os.environ['WORKSPACE_BUCKET']
+
+WORKSPACE_ATTRIBUTES = fapi.get_workspace(WORKSPACE_NAMESPACE, WORKSPACE_NAME).json().get('workspace',{}).get('attributes',{})
+
+GS_RELEASE_PATH = 'gs://amp-pd-data/releases/2020_v2release_1218'
+GS_CLINICAL_RELEASE_PATH = f'{GS_RELEASE_PATH}/clinical'
+
+GS_WGS_RELEASE_PATH = 'gs://amp-pd-genomics/releases/2020_v2release_1218/wgs'
+GS_WGS_RELEASE_PLINK_PATH = os.path.join(GS_WGS_RELEASE_PATH, 'plink')
+GS_WGS_RELEASE_GATK_PATH = os.path.join(GS_WGS_RELEASE_PATH, 'gatk')
+
+BQ_RELEASE_DATASET = 'amp-pd-research.2020_v2release_1218'
+
+
+print(BILLING_PROJECT_ID)
+print(GS_CLINICAL_RELEASE_PATH)
+print(GS_WGS_RELEASE_PLINK_PATH)
+print(GS_WGS_RELEASE_GATK_PATH)
+
+# Get the data from a query
+def bq_query(query):
+    """Return the contents of a query against BigQuery"""
+    return pd.read_gbq(
+        query,
+        project_id=BILLING_PROJECT_ID,
+        dialect='standard')
+        
+ clinical_tables = f"""
+
+SELECT 
+project_id, dataset_id, table_id, row_count, size_bytes 
+
+FROM `{BQ_RELEASE_DATASET}.__TABLES__`
+
+"""
+
+
+bq_query(clinical_tables)
+
+
+CLINICAL DUPLICATES
+dups = f"""
+
+SELECT 
+*
+
+FROM `{BQ_RELEASE_DATASET}.amp_pd_participant_wgs_duplicates`
+
+"""
+
+
+duplicates = bq_query(dups)
+
+covariates = f"""
+
+SELECT 
+participant_id, sex, age_at_baseline 
+
+FROM `{BQ_RELEASE_DATASET}.Demographics`
+
+"""
+
+
+covs = bq_query(covariates)
+
+covs = covs.drop_duplicates()
+covs.info()
+covsp = covs
+covsp['IID'] = covsp['participant_id']
+covsp = covsp[['participant_id', 'IID', 'sex', 'age_at_baseline']]
+covsp['sex'] = covsp['sex'].astype(str)
+covsp.sex[(covsp.sex == "Male")] = 1
+covsp.sex[(covsp.sex == "Female")] = 2
+covsp.columns = ['FID','IID', 'sex', 'age_at_baseline']
+
+#phenotypes
+
+phenotype = f"""
+
+SELECT 
+* 
+
+FROM `{BQ_RELEASE_DATASET}.amp_pd_case_control`
+
+"""
+
+pheno = bq_query(phenotype)
+
+phenop = pheno
+phenop['IID'] = phenop['participant_id']
+phenop = phenop[['participant_id', 'IID', 'case_control_other_latest']]
+phenop.columns = ['FID','IID', 'PHENO']
+phenop = phenop[(phenop.PHENO != 'Other')]
+phenop.PHENO[(phenop.PHENO == "Case")] = 2
+phenop.PHENO[(phenop.PHENO == "Control")] = 1
+
+covsp.to_csv('plink_test_covs.tab', index=False, sep='\t')
+phenop.to_csv('plink_test_pheno.tab', index=False, sep='\t')
+
+Data processing
+Prepare PLINK
+
+!wget http://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20190304.zip -P ~/bin/data_temp/
+!unzip -o ~/bin/data_temp/plink_linux_x86_64_20190304.zip -d ~/bin/
+!~/bin/plink
+
+Download data
+!gsutil cp gs://fc-secure-80938fc1-7647-424e-8db8-eadc9f0f8220/PCA_filtered_europeans.txt .
+!for N in `seq 22` X Y; \
+do \
+gsutil -mu yuresname cp gs://amp-pd-genomics/releases/2020_v2release_1218/wgs/plink/bfile/chr${N}.* .; \
+done
+UPDATE sex
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink \
+--bfile chr${N} \
+--update-sex plink_test_covs.tab \
+--make-bed \
+--out chr${N}_updated_sex && \
+chr${N}.*; \
+done
+
+
+#update phenotype
+
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink \
+--bfile chr${N}_updated_sex \
+--make-pheno plink_test_pheno.tab 2 \
+--keep plink_test_pheno.tab \
+--make-bed \
+--out chr${N}_updated_pheno && \
+rm chr${N}_updated_sex.*; \
+done
+
+##ancestry
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink \
+--bfile chr${N}_updated_pheno \
+--keep PCA_filtered_europeans.txt \
+--make-bed \
+--out chr${N}_after_ancestry && \
+rm chr${N}_updated_pheno.*; \
+done
+
+#relatedness
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink --bfile chr${N}_after_ancestry --geno 0.05 --maf 0.05 --indep-pairwise 50 5 0.5 --out chr${N}_pruning && \
+~/bin/plink --bfile chr${N}_after_ancestry --extract chr${N}_pruning.prune.in --make-bed --out chr${N}_pruned_data && \
+~/bin/plink --bfile chr${N}_pruned_data --het --out chr${N}_prunedHet; \
+done
+
+!~/bin/gcta_1.93.2beta/gcta64
+!ls chr*_pruned_data* | cut -d . -f 1 | sort -u > pruned_files_list
+!~/bin/gcta_1.93.2beta/gcta64 --mbfile pruned_files_list --make-grm --out GRM_matrix --autosome --maf 0.05
+!~/bin/gcta_1.93.2beta/gcta64 --grm-cutoff 0.125 --grm GRM_matrix --out GRM_matrix_0125 --make-grm
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink \
+--bfile chr${N}_after_ancestry \
+--keep GRM_matrix_0125.grm.id \
+--make-bed \
+--out chr${N}_after_ancestry_pihat && \
+rm chr${N}_after_ancestry.* chr${N}_pruning.* chr${N}_pruned_data.* chr${N}_prunedHet.*; \
+done
+
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink \
+--bfile chr${N}_after_ancestry_pihat \
+--make-bed \
+--out chr${N}_after_ancestry_pihat_mind \
+--geno 0.05 && \
+rm chr${N}_after_ancestry_pihat.*; \
+done
+
+#missingness
+!for N in `seq 22` X Y; \
+do \
+~/bin/plink --bfile chr${N}_after_ancestry_pihat_mind_missing1 --test-mishap --out chr${N}_missing_hap && \
+awk '{if ($8 <= 0.0001) print $9 }' chr${N}_missing_hap.missing.hap > chr${N}_missing_haps_1E4.txt && \
+sed 's/|/\
+/g' chr${N}_missing_haps_1E4.txt > chr${N}_missing_haps_1E4_final.txt && \
+~/bin/plink \
+--bfile chr${N}_after_ancestry_pihat_mind_missing1 \
+--exclude chr${N}_missing_haps_1E4_final.txt \
+--make-bed \
+--out chr${N}_after_ancestry_pihat_mind_missing2 && \
+rm chr${N}_after_ancestry_pihat_mind_missing1.* chr${N}_missing_hap.* chr${N}_missing_haps_1E4.txt chr${N}_missing_haps_1E4_final.txt; \
+done
+
+
+###annotation
+!wget http://www.openbioinformatics.org/annovar/download/0wgxR2rIVP/annovar.latest.tar.gz
+!tar xvf annovar.latest.tar.gz
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar refGene annovar/humandb/
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb cytoBand annovar/humandb/
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar ensGene annovar/humandb/
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar exac03 annovar/humandb/ 
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar avsnp147 annovar/humandb/ 
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar dbnsfp30a annovar/humandb/
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar gnomad211_genome annovar/humandb/
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar ljb26_all annovar/humandb/
+!perl annovar/annotate_variation.pl -buildver hg38 -downdb -webfrom annovar clinvar_20190305 annovar/humandb/
+!perl annovar/convert2annovar.pl \
+-format vcf4 \
+-allsample \
+-withfreq chr${CHR_N}_FILTERED_fragment_recode.vcf.gz > chr${CHR_N}_FILTERED_fragment_recode_convert
+!perl annovar/table_annovar.pl chr${CHR_N}_FILTERED_fragment_recode_convert \
+annovar/humandb/ -buildver hg38 \
+--thread `nproc` \
+-out chr${CHR_N}_FILTERED_fragment_recode_convert.annovar \
+-remove \
+-protocol refGene,ljb26_all,gnomad211_genome,clinvar_20190305 \
+-operation g,f,f,f \
+-nastring .
+!head -1 chr${CHR_N}_FILTERED_fragment_recode_convert.annovar.hg38_multianno.txt > chr${CHR_N}_header.txt
+!colct="$(wc -w chr${CHR_N}_header.txt| cut -f1 -d' ')"
+!cut -f1-$colct chr${CHR_N}_FILTERED_fragment_recode_convert.annovar.hg38_multianno.txt \
+> chr${CHR_N}_FILTERED_fragment_recode_convert.annovar.trimmed.txt
+cut: chr14_FILTERED_fragment_recode_convert.annovar.hg38_multianno.txt: No such file or directory
+!rm chr${CHR_N}_header.txt
+
+###we than extracted ARSA (hg38) and perfromed burden analysis and meta-analysis with another cohorts
